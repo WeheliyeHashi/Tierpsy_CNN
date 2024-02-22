@@ -13,7 +13,6 @@ cython
 imgstore
 trackpy
 pytables
-numba
 tqdm
 requests
 opencv
