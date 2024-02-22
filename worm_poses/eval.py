@@ -40,7 +40,7 @@ from tierpsy.analysis.ske_orient.checkHeadOrientation import isWormHTSwitched
 from tierpsy.helper.params.get_defaults import head_tail_defaults
 
 from deeptangle import spline as sp
-from Wormstats import wormstats
+from inference.Wormstats import wormstats
 from tierpsy.analysis.compress.compressVideo import getROIMask, compressVideo
 from tierpsy.helper.params import compress_defaults
 from skimage.transform import resize
