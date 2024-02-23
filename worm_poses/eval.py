@@ -1,5 +1,5 @@
 # %% loading
-%matplotlib qt
+#%matplotlib qt
 from pathlib import Path
 import pickle
 import jax.numpy as jnp
@@ -20,7 +20,6 @@ import subprocess
 import tqdm 
 import multiprocessing as mp
 import deeptangle as dt
-
 import time
 import h5py
 import matplotlib.colors as mcolors
@@ -43,7 +42,7 @@ from deeptangle import spline as sp
 from inference.Wormstats import wormstats
 from tierpsy.analysis.compress.compressVideo import getROIMask, compressVideo
 from tierpsy.helper.params import compress_defaults
-from skimage.transform import resize
+import json
 jax.config.update('jax_platform_name', 'gpu')
 print(jax.local_devices())
 #%%
@@ -65,6 +64,12 @@ max_gap_allowed=max(1, int(expected_fps//2))
 window_std =max(int(round(expected_fps)),5)
 min_block_size =max(int(round(expected_fps)),5) 
 #%%
+
+def read_params(json_file =''):
+     if json_file:
+          with open(json_file) as fid:
+               params_in_file = json.load(fid)
+
 
 def _return_masked_image(raw_fname, px2um=microns_per_pixel):
     
