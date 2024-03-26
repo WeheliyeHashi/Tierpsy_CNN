@@ -39,7 +39,7 @@ from tierpsy.analysis.ske_orient.checkHeadOrientation import isWormHTSwitched
 from tierpsy.helper.params.get_defaults import head_tail_defaults
 from tierpsy.analysis.compress.Readers import readLoopBio
 from deeptangle import spline as sp
-from inference.Wormstats import wormstats
+from Wormstats import wormstats
 from tierpsy.analysis.compress.compressVideo import getROIMask, compressVideo
 from tierpsy.helper.params import compress_defaults
 from skimage.transform import resize
@@ -47,35 +47,32 @@ from skimage.transform import resize
 import json
 jax.config.update('jax_platform_name', 'gpu')
 print(jax.local_devices())
-#%%
 
 
 
-def read_params(json_file =''):
-     if json_file:
-          with open(json_file) as fid:
-               params_in_file = json.load(fid)
-     return params_in_file
+
+input_vid = '/home/weheliye@cscdom.csc.mrc.ac.uk/Desktop/deeptangle/Debugging_code/Random_Videos/Video_10_GPCR/RawVideos/20230223/20230223_gpcr_screen_run4_bluelight_20230223_123821.22956818/metadata.yaml'
+params_well = 24
 
 #%%
-
 """
        Initialise the parameters for the model 
 
 """
-model = '/home/weheliye@cscdom.csc.mrc.ac.uk/Desktop/deeptangle/Debugging_code/Train_data/Mixed_Frame_clips/models/parameters_multi_worms_Final_mixed_train_data_pca_92_epochs_200_21_Feb_2024_wout_bgd'
-input_vid = '/home/weheliye@cscdom.csc.mrc.ac.uk/Desktop/deeptangle/Debugging_code/Random_Videos/Video_10_GPCR/RawVideos/20230223/20230223_gpcr_screen_run4_bluelight_20230223_123821.22956818/metadata.yaml'
-params_well = 24
+def read_params(json_file =''):
+         if json_file:
+           with open(json_file) as fid:
+               params_in_file = json.load(fid)
+         return params_in_file
+
+
 if params_well==24:
     params_in_file = read_params('configs/loopbio_rig_24WP_splitFOV_NN_20220202.json')
 elif params_well==96:
      params_in_file = read_params('configs/loopbio_rig_96WP_splitFOV_NN_20220202.json')
 else:
-     params_in_file =read_params('configs/loopbio_rig_6WP_splitFOV_NN_20220202.json')
+     params_in_file = read_params('configs/loopbio_rig_6WP_splitFOV_NN_20220202.json')
      
-
-
-
 
 step_size = params_in_file['step_size']
 nframes = params_in_file['nframes']
@@ -85,10 +82,21 @@ skip_frame = params_in_file['skip_frame']
 expected_fps = params_in_file['expected_fps']
 microns_per_pixel = params_in_file['microns_per_pixel'] 
 MW_mapping = params_in_file['MWP_mapping']
+model = params_in_file['model_path']
+is_light = params_in_file['is_light_background']
+block_size = params_in_file['thresh_C']
+Constant = params_in_file['thresh_block_size']
 max_gap_allowed=max(1, int(expected_fps//2))
 window_std =max(int(round(expected_fps)),5)
 min_block_size =max(int(round(expected_fps)),5) 
-#%%
+num_batches=10
+Save_name = Path(str(Path(input_vid).parent).replace('RawVideos','Results'))
+Save_name.mkdir(exist_ok=True, parents=True)
+min_frame = 0
+max_frame = nframes*11
+Start_Frame= 5*skip_frame
+#%%%
+
 
 def _return_masked_image(raw_fname, px2um=microns_per_pixel, json_fname = MW_mapping):
     
@@ -144,22 +152,21 @@ def load_model(origin_dir: str, broadcast: bool = False):
     return forward_fn, state
 
 
-def _adpative_thresholding(img, blocksize=15, Constant =1):
-     img = (255-img).astype(np.uint8)
+def _adpative_thresholding(img : np.uint8, blocksize=block_size, Constant = Constant):
+     if is_light:
+        img = (255-img)
      th = np.array([cv2.adaptiveThreshold(img[j,:],255,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,blocksize,Constant)==0  for j in (range(img.shape[0])) ])
      return th
 
 
 
-def _SVD_bgd(store, max_frame, skip_frame, scale=1):
-     clip = 255-np.array([store.get_image(store.frame_min+frame)[0] for frame in range(0, max_frame, skip_frame)])
-     clip = resize(clip, [clip.shape[0], int(clip.shape[1]/scale), int(clip.shape[2]/scale)])
+def _SVD_bgd(clip):
      X = clip.reshape(clip.shape[0],-1)
      U, s, V = np.linalg.svd(X, full_matrices=False)
      low_rank = np.expand_dims(U[:,0], 1) * s[0] * np.expand_dims(V[0,:], 0)
      X = low_rank.reshape(clip.shape)
-     X = resize(X, [X.shape[0], int(X.shape[1]*scale), int(X.shape[2]*scale)])
-     return X
+     extra_bottom, extra_right = (16-X.shape[0]%16, 16-X.shape[1]%16)
+     return X, extra_bottom, extra_right
 
 def non_max_suppression(p, threshold=0.2, overlap_threshold=0.5, cutoff=48):
     p = jax.tree_util.tree_map(lambda x: np.array(x), p)
@@ -180,104 +187,8 @@ def predict_in_batches(x, forward_fn, state):
                 
      
             return predictions
-        
 
 
-# %%
-num_batches=10
-
-forward_fn, state = load_model(model, broadcast=False)
-store = _load_video(input_vid)
-
-Save_name = Path(str(Path(input_vid).parent).replace('RawVideos','Results'))
-Save_name.mkdir(exist_ok=True, parents=True)
-
-state_single =utils.single_from_sharded(state)
-min_frame=0
-max_frame=110
-inter_skip=step_size
-Start_Frame= list(range(min_frame, max_frame,10))[5]
-fovsplitter= _return_masked_image(input_vid)
-bgd = _SVD_bgd(store, store.frame_count, 500, scale=1).min(axis=0)*255
-
-plt.imshow(bgd)
-
-#%%
-
-def _begin_process(Save_name, store, min_frame, max_frame, inter_skip, Start_Frame, bgd):
-        with h5py.File((Save_name).joinpath('skeletonNN.hdf5'), 'w') as f:
-                    
-                    w_group = f.create_group('skeletonNN_w')
-                    p_group = f.create_group('skeletonNN_p')
-                    s_group = f.create_group('skeletonNN_s')
-                    batch = []
-                    frame_list= []
-                    
-                    
-                    clip = np.array([store.get_next_image()[0] for _ in range(min_frame, max_frame)])
-                   
-                    #th = _adpative_thresholding_tierpsy(clip_masked*255,31,15, True, False)*clip_masked
-                   
-                    bn = Path(Save_name).parent.name
-                    for time_stamp, frame_number in enumerate(tqdm.trange(0,500,inter_skip, desc = bn)):
-                            
-                            clip_inverted = (255-clip[::10,:])
-                            #th = clip_inverted*((clip_inverted- bgd)>15) 
-                            th = _adpative_thresholding(clip_inverted)*(clip_inverted)#_adpative_thresholding(255-clip[::10,:])*
-                            
-                            th = th*((clip_inverted- bgd)>15) 
-                            if time_stamp%num_batches==0 and time_stamp!=0:
-                                batch = jnp.asarray(batch)
-                                predictions = predict_in_batches(batch,forward_fn, state_single)
-                                for (Frame, preds) in (zip(frame_list, predictions)):
-                                    dataset_name = f'frame_number_{Frame:05}'
-                                    #print(Frame, dataset_name)
-                                    w,s,p = preds
-                                    w_group.create_dataset(dataset_name, data=w, compression='gzip')
-                                    p_group.create_dataset(dataset_name, data=p, compression= 'gzip')
-                                    s_group.create_dataset(dataset_name, data =s, compression='gzip')
-                                batch = []
-                                frame_list = []
-                            
-                            FN = frame_number+(Start_Frame)
-                            frame_list.append(int(FN))
-                            batch.append((jnp.asarray(th/255,dtype=np.float32)))    
-                            small_clip =  np.array([store.get_next_image()[0] for _ in range(inter_skip)])
-                            clip = np.concatenate((clip[inter_skip:,:], small_clip), axis=0 )
-                        
-
-
-#%%
-store = _load_video(input_vid)
-t_s=time.time()
-_begin_process(Save_name, store, min_frame, max_frame, inter_skip,Start_Frame, bgd)
-t_end = time.time()   
-print(f'total time taken is {(t_end-t_s)/60} minutes')
-
-print('Data processing compeleted')
-
-
-
-# %%
-
-"""
-View results 
-"""
-
-Results_folder = Path(str(Path(input_vid).parent).replace('RawVideos','Results')).joinpath('skeletonNN.hdf5')
-
-
-#%%
-#predictions_list = []
-with h5py.File(Results_folder, 'r') as f:
-    predictions_list = [Predictions(f['skeletonNN_w'][dataset][:],f['skeletonNN_s'][dataset][:],f['skeletonNN_p'][dataset][:])  for dataset in f['skeletonNN_p']]
-
-#%%
-identities_list, splines_list = dt.identity_assignment(predictions_list, memory=15)
-identities_list, splines_list = dt.merge_tracks(identities_list, splines_list, framesize=bgd.shape[0])
-
-
-#%%
 
 """
 Correct skeleton orientation
@@ -302,7 +213,7 @@ def correct_skeleton_orient(skeleton):
      return skeleton_orientworm 
 
 """
-Create spline to feel gaps 
+Create spline to fill gaps 
 
 """
 
@@ -352,102 +263,169 @@ def _spline_skel(skeleton, worm_i, step_size=step_size, n_chuncks=10,Ma=5,Mb=10)
         shape_list_array.append(shape_list[:,i,:])
 
     return np.array(shape_list_array)[:,:,[2,1]]
+        
+def _begin_process(Save_name, store, min_frame, max_frame, inter_skip, Start_Frame, bgd, extra_bottom, extra_right):
+        with h5py.File((Save_name).joinpath('skeletonNN.hdf5'), 'w') as f:
+                    
+                    w_group = f.create_group('skeletonNN_w')
+                    p_group = f.create_group('skeletonNN_p')
+                    s_group = f.create_group('skeletonNN_s')
+                    batch = []
+                    frame_list= []
+                    
+                    
+                    #clip = np.array([store.get_next_image()[0] for _ in range(min_frame, max_frame)])
+                    clip = np.array([store.read_frame(frame)[1] for frame in range(min_frame,max_frame)])
+                   
+                    
+                   
+                    bn = Path(Save_name).parent.name
+                    for time_stamp, frame_number in enumerate(tqdm.trange(0,500,inter_skip, desc = bn)):
+                            
+                            if is_light:
+                                clip_inverted = (255-clip[::10,:])
+                            #th = clip_inverted*((clip_inverted- bgd)>15) 
+                            th = _adpative_thresholding(clip_inverted)*(clip_inverted)#_adpative_thresholding(255-clip[::10,:])*
+                            
+                            th = th*((clip_inverted- bgd)>15)
+                            th = jnp.pad(th, ((0, 0),(0, extra_bottom), (0, extra_right)),
+                                        mode='constant', constant_values=0)  
+                            if time_stamp%num_batches==0 and time_stamp!=0:
+                                batch = jnp.asarray(batch)
+                                predictions = predict_in_batches(batch,forward_fn, state_single)
+                                for (Frame, preds) in (zip(frame_list, predictions)):
+                                    dataset_name = f'frame_number_{Frame:05}'
+                                    #print(Frame, dataset_name)
+                                    w,s,p = preds
+                                    w_group.create_dataset(dataset_name, data=w, compression='gzip')
+                                    p_group.create_dataset(dataset_name, data=p, compression= 'gzip')
+                                    s_group.create_dataset(dataset_name, data =s, compression='gzip')
+                                batch = []
+                                frame_list = []
+                            
+                            FN = frame_number+(Start_Frame)
+                            frame_list.append(int(FN))
+                            batch.append((jnp.asarray(th/255,dtype=np.float32)))    
+                            small_clip =  np.array([store.get_next_image()[0] for _ in range(inter_skip)])
+                            clip = np.concatenate((clip[inter_skip:,:], small_clip), axis=0 )
+                        
 
+
+def _tracking(Results_folder):
+     
+     """
+     Post processing stage 
+     """
+     with h5py.File(Results_folder, 'r') as f:
+        predictions_list = [Predictions(f['skeletonNN_w'][dataset][:],f['skeletonNN_s'][dataset][:],f['skeletonNN_p'][dataset][:])  for dataset in f['skeletonNN_p']]
+
+
+     identities_list, splines_list = dt.identity_assignment(predictions_list, memory=15)
+     identities_list, splines_list = dt.merge_tracks(identities_list, splines_list, framesize=bgd.shape[0])
+     return identities_list, splines_list
+
+
+def _post_processing(Results_folder, splines_list, identities_list, n_chunks=10):
+
+     skeleton_folder = Path(str(Path(input_vid).parent).replace('RawVideos','Results')).joinpath('metadataCNN_featuresN.hdf5')
+
+     wormstats_header= wormstats()
+     segment4angle =max(1, int(round(splines_list[0].shape[1]/10)))
+     unique_worm_IDS = list( set(x for sublist in identities_list for x in sublist))
+     apply_spline = False
+     with tb.File(skeleton_folder, 'w') as f:
+            tab_time_series = f.create_table('/','timeseries_data', wormstats_header.header_timeseries, filters=TABLE_FILTERS)
+            tab_blob = f.create_table('/','blob_features', wormstats_header.blob_data, filters=TABLE_FILTERS)
+            tab_traj = f.create_table('/','trajectories_data',wormstats_header.worm_data, filters=TABLE_FILTERS)
+            
+
+            worm_coords_array= {}
+            for  array_name in ['skeleton']:
+                    worm_coords_array[array_name] = f.create_earray(
+                        '/',
+                        array_name,
+                        shape=(
+                            0,
+                            splines_list[0].shape[1],
+                            splines_list[0].shape[2]),
+                        atom=tb.Float32Atom(
+                            shape=()),
+                        filters=TABLE_FILTERS)
+            length_tab = 0 
+            for i, worm_index_joined in tqdm.tqdm(enumerate(unique_worm_IDS), total = len(unique_worm_IDS)):
+                
+                worm_i, worm_j = np.where(pd.DataFrame(identities_list).values==worm_index_joined)
+                
+                
+
+        
+
+                skeleton = np.array([splines_list[x][y,:] for x,y in zip(worm_i,worm_j)])
+                skeleton = correct_skeleton_orient(skeleton)
+               
+                if apply_spline: 
+                    skeleton = np.concatenate([_spline_skel(skeleton[i-1:i+n_chunks],worm_i[i-1:i+n_chunks], step_size, n_chunks) for i in range(1,skeleton.shape[0],n_chunks) if len(worm_i[i-1:i+n_chunks])==n_chunks+1])
+                    frame_window = np.squeeze([worm_i[i-1:i+n_chunks]*step_size+Start_Frame for i in range(1,skeleton.shape[0],n_chunks) if len(worm_i[i-1:i+n_chunks])==n_chunks+1])
+                    frame_window = range(frame_window.min(), frame_window.max())
+                else: 
+                    frame_window = worm_i*step_size+Start_Frame
+                
+                skeleton = correct_skeleton_orient(skeleton)
+                is_switch_skel, _= isWormHTSwitched(skeleton,segment4angle=segment4angle, max_gap_allowed=max_gap_allowed,window_std=window_std, min_block_size=min_block_size)
+                skeleton[is_switch_skel] = skeleton[is_switch_skel,::-1,:]
+                
+                worm_data=pd.DataFrame([(s, '', worm_index_joined,skel[:,0].mean(), skel[:,1].mean(),84,1,102,100,1)  for s, skel in zip(frame_window, skeleton)], columns=['frame_number','skeleton_id','worm_index_joined','coord_x','coord_y','threshold','has_skeleton','roi_size','area','is_good_skel'])
+                worm_data['skeleton_id'] =worm_data.index+length_tab#len(tab_traj)
+                timestamp = worm_data['frame_number'].values.astype(np.int32)
+
+                feats = features.get_timeseries_features(skeleton*microns_per_pixel, timestamp = timestamp, fps = expected_fps)
+                feats = feats.astype(np.float32)
+                feats.insert(0,'worm_index',worm_index_joined)
+                feats.insert(2,'well_name', (fovsplitter.find_well_from_trajectories_data(worm_data)))
+                blob = feats[['area','length']]
+                
+                    
+                tab_traj.append(worm_data.to_records(index=False))
+                set_unit_conversions(tab_traj, 
+                                    expected_fps=expected_fps, 
+                                microns_per_pixel=microns_per_pixel)
+                tab_time_series.append(feats.to_records(index=False))
+                tab_blob.append(blob.to_records(index=False))
+                worm_coords_array['skeleton'].append(skeleton)
+                length_tab = len(tab_traj)
+            
+                if MW_mapping:
+                    fovsplitter= _return_masked_image(input_vid,px2um=microns_per_pixel, json_fname=MW_mapping)
+                    fovsplitter.write_fov_wells_to_file(skeleton_folder)
+
+# %%
+
+"""
+pre_processing the videos and loading the models  
+
+"""
+forward_fn, state = load_model(model, broadcast=False)
+state_single =utils.single_from_sharded(state)
+store = _load_video(input_vid)
+
+pre_procesing_clip =  np.array([store.read_frame(frame)[1] for frame in range(min_frame, int(store.tot_frames), 500)])
+if is_light:
+     pre_procesing_clip = 255- pre_procesing_clip
+bgd, extra_bottom, extra_right = _SVD_bgd(pre_procesing_clip).min(axis=0)
+
+plt.imshow(bgd)
+
+     
 
 #%%
-     
+"""
+Execute the code 
+
+"""
+store = _load_video(input_vid)
 t_s=time.time()
-"""
-Calculate the time series 
-
-"""
-skeleton_folder = Path(str(Path(input_vid).parent).replace('RawVideos','Results')).joinpath('metadata_featuresN.hdf5')
-
-wormstats_header= wormstats()
-segment4angle =max(1, int(round(splines_list[0].shape[1]/10)))
-unique_worm_IDS = list( set(x for sublist in identities_list for x in sublist))
-n_chunks = 10
-apply_spline = False
-with tb.File(skeleton_folder, 'w') as f:
-        tab_time_series = f.create_table('/','timeseries_data', wormstats_header.header_timeseries, filters=TABLE_FILTERS)
-        tab_blob = f.create_table('/','blob_features', wormstats_header.blob_data, filters=TABLE_FILTERS)
-        tab_traj = f.create_table('/','trajectories_data',wormstats_header.worm_data, filters=TABLE_FILTERS)
-        
-
-        worm_coords_array= {}
-        for  array_name in ['skeleton']:
-                worm_coords_array[array_name] = f.create_earray(
-                    '/',
-                    array_name,
-                    shape=(
-                        0,
-                        splines_list[0].shape[1],
-                        splines_list[0].shape[2]),
-                    atom=tb.Float32Atom(
-                        shape=()),
-                    filters=TABLE_FILTERS)
-        length_tab = 0 
-        for i, worm_index_joined in tqdm.tqdm(enumerate(unique_worm_IDS), total = len(unique_worm_IDS)):
-            
-            worm_i, worm_j = np.where(pd.DataFrame(identities_list).values==worm_index_joined)
-            
-            
-
-       
-            #if len(worm_j)>n_chunks**2:
-            skeleton = np.array([splines_list[x][y,:] for x,y in zip(worm_i,worm_j)])
-            skeleton = correct_skeleton_orient(skeleton)
-            #is_switch_skel, roll_std=isWormHTSwitched(skeleton,segment4angle=segment4angle, max_gap_allowed=max_gap_allowed,window_std=window_std, min_block_size=min_block_size)
-            #skeleton[is_switch_skel] = skeleton[is_switch_skel,::-1,:]
-        
-            #print(skeleton.shape)
-            #if worm_index_joined==1: break
-            if apply_spline: 
-                skeleton = np.concatenate([_spline_skel(skeleton[i-1:i+n_chunks],worm_i[i-1:i+n_chunks], step_size, n_chunks) for i in range(1,skeleton.shape[0],n_chunks) if len(worm_i[i-1:i+n_chunks])==n_chunks+1])
-                frame_window = np.squeeze([worm_i[i-1:i+n_chunks]*step_size+Start_Frame for i in range(1,skeleton.shape[0],n_chunks) if len(worm_i[i-1:i+n_chunks])==n_chunks+1])
-                frame_window = range(frame_window.min(), frame_window.max())
-            else: 
-                frame_window = worm_i*step_size+Start_Frame
-            
-            skeleton = correct_skeleton_orient(skeleton)
-            is_switch_skel, roll_std=isWormHTSwitched(skeleton,segment4angle=segment4angle, max_gap_allowed=max_gap_allowed,window_std=window_std, min_block_size=min_block_size)
-            skeleton[is_switch_skel] = skeleton[is_switch_skel,::-1,:]
-            
-            worm_data=pd.DataFrame([(s, '', worm_index_joined,skel[:,0].mean(), skel[:,1].mean(),84,1,102,100,1)  for s, skel in zip(frame_window, skeleton)], columns=['frame_number','skeleton_id','worm_index_joined','coord_x','coord_y','threshold','has_skeleton','roi_size','area','is_good_skel'])
-            worm_data['skeleton_id'] =worm_data.index+length_tab#len(tab_traj)
-            timestamp = worm_data['frame_number'].values.astype(np.int32)
-
-            feats = features.get_timeseries_features(skeleton*microns_per_pixel, timestamp = timestamp, fps = expected_fps)
-            feats = feats.astype(np.float32)
-            feats.insert(0,'worm_index',worm_index_joined)
-            feats.insert(2,'well_name', (fovsplitter.find_well_from_trajectories_data(worm_data)))
-            blob = feats[['area','length']]
-            
-                
-            tab_traj.append(worm_data.to_records(index=False))
-            set_unit_conversions(tab_traj, 
-                                expected_fps=expected_fps, 
-                            microns_per_pixel=microns_per_pixel)
-            tab_time_series.append(feats.to_records(index=False))
-            tab_blob.append(blob.to_records(index=False))
-            worm_coords_array['skeleton'].append(skeleton)
-            length_tab = len(tab_traj)
-          
-          
-            
-            
-          
-           
-           
-           
-if MW_mapping:
-    fovsplitter= _return_masked_image(input_vid,px2um=microns_per_pixel, json_fname=MW_mapping)
-    fovsplitter.write_fov_wells_to_file(skeleton_folder)
-
-
+_begin_process(Save_name, store, min_frame, max_frame, step_size,Start_Frame, bgd, extra_bottom, extra_right)
 t_end = time.time()   
 print(f'total time taken is {(t_end-t_s)/60} minutes')
 
 print('Data processing compeleted')
-#%%
-

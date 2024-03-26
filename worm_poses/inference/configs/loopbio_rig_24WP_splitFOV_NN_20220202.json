@@ -1,0 +1,20 @@
+{
+    "analysis_type": "TIERPSY_CNN",
+    "skip_frame": 10,
+    "step_size": 5,
+    "nframes": 11,
+    "n_suggestions": 8,
+    "latent_dim": 8,
+    "expected_fps": 25,
+    "microns_per_pixel": 12.4,
+    "MWP_mapping": "HYDRA_24WP_UPRIGHT.json",
+    "is_light_background": true,
+    "thresh_C": 15,
+    "thresh_block_size": 1,
+    "model_path":"/home/weheliye@cscdom.csc.mrc.ac.uk/Desktop/deeptangle/Debugging_code/Train_data/Mixed_Frame_clips/models/parameters_Final_mixed_train_data_wt_hand_ann_pca_92_epochs_181_2024-03-23_48_cutoff", 
+    "reader_type": "loopbio"
+
+
+
+
+}
