@@ -37,43 +37,62 @@ from tierpsy.helper.misc import TimeCounter, print_flush, WLAB, TABLE_FILTERS
 from tierpsy.helper.params import set_unit_conversions, read_unit_conversions
 from tierpsy.analysis.ske_orient.checkHeadOrientation import isWormHTSwitched
 from tierpsy.helper.params.get_defaults import head_tail_defaults
-
+from tierpsy.analysis.compress.Readers import readLoopBio
 from deeptangle import spline as sp
 from inference.Wormstats import wormstats
 from tierpsy.analysis.compress.compressVideo import getROIMask, compressVideo
 from tierpsy.helper.params import compress_defaults
+from skimage.transform import resize
+
 import json
 jax.config.update('jax_platform_name', 'gpu')
 print(jax.local_devices())
+#%%
+
+
+
+def read_params(json_file =''):
+     if json_file:
+          with open(json_file) as fid:
+               params_in_file = json.load(fid)
+     return params_in_file
+
 #%%
 
 """
        Initialise the parameters for the model 
 
 """
-model = 'Train_data/Mixed_Frame_clips/models/parameters_multi_worms_Final_mixed_train_data_pca_72_epochs_200_14_Feb_2024_wout_bgd'
-input_vid = 'Random_Videos/Video_10_GPCR/RawVideos/20230223/20230223_gpcr_screen_run4_bluelight_20230223_123821.22956818/metadata.yaml'
-step_size=5
-nframes =11
-n_suggestions= 8
-latent_dim = 8
-path = Path(model)
-expected_fps=25
-microns_per_pixel = 12.4
+model = '/home/weheliye@cscdom.csc.mrc.ac.uk/Desktop/deeptangle/Debugging_code/Train_data/Mixed_Frame_clips/models/parameters_multi_worms_Final_mixed_train_data_pca_92_epochs_200_21_Feb_2024_wout_bgd'
+input_vid = '/home/weheliye@cscdom.csc.mrc.ac.uk/Desktop/deeptangle/Debugging_code/Random_Videos/Video_10_GPCR/RawVideos/20230223/20230223_gpcr_screen_run4_bluelight_20230223_123821.22956818/metadata.yaml'
+params_well = 24
+if params_well==24:
+    params_in_file = read_params('configs/loopbio_rig_24WP_splitFOV_NN_20220202.json')
+elif params_well==96:
+     params_in_file = read_params('configs/loopbio_rig_96WP_splitFOV_NN_20220202.json')
+else:
+     params_in_file =read_params('configs/loopbio_rig_6WP_splitFOV_NN_20220202.json')
+     
+
+
+
+
+step_size = params_in_file['step_size']
+nframes = params_in_file['nframes']
+n_suggestions = params_in_file['n_suggestions']
+latent_dim = params_in_file['latent_dim']
+skip_frame = params_in_file['skip_frame']
+expected_fps = params_in_file['expected_fps']
+microns_per_pixel = params_in_file['microns_per_pixel'] 
+MW_mapping = params_in_file['MWP_mapping']
 max_gap_allowed=max(1, int(expected_fps//2))
 window_std =max(int(round(expected_fps)),5)
 min_block_size =max(int(round(expected_fps)),5) 
 #%%
 
-def read_params(json_file =''):
-     if json_file:
-          with open(json_file) as fid:
-               params_in_file = json.load(fid)
-
-
-def _return_masked_image(raw_fname, px2um=microns_per_pixel):
+def _return_masked_image(raw_fname, px2um=microns_per_pixel, json_fname = MW_mapping):
     
-    json_fname = Path('Path2JSON/HYDRA_24WP_UPRIGHT.json')
+    json_fname = Path('Path2JSON').joinpath(MW_mapping)
 
     splitfov_params = SplitFOVParams(json_file=json_fname)
     shape, edge_frac, sz_mm = splitfov_params.get_common_params()
@@ -100,7 +119,8 @@ def _return_masked_image(raw_fname, px2um=microns_per_pixel):
 
 
 def  _load_video(raw_videos):
-        store = imgstore.new_for_filename((raw_videos))
+        #store = imgstore.new_for_filename((raw_videos))
+        store = selectVideoReader(raw_videos)
         return store
 
 def load_model(origin_dir: str, broadcast: bool = False):
@@ -129,13 +149,6 @@ def _adpative_thresholding(img, blocksize=15, Constant =1):
      th = np.array([cv2.adaptiveThreshold(img[j,:],255,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,blocksize,Constant)==0  for j in (range(img.shape[0])) ])
      return th
 
-def _adpative_thresholding_tierpsy(img, blocksize=31, Constant =15, keep_border=True, is_light_background=True):
-     img = img.astype(np.uint8)
-     if len(img.shape)>=3:
-        th = np.array([getROIMask(img[i,:], 0, 5000, blocksize,Constant,1, keep_border,is_light_background) for i in range(img.shape[0])])
-     else:
-        th =  getROIMask(img, 0, 5000, blocksize,Constant,1, keep_border,is_light_background) 
-     return th
 
 
 def _SVD_bgd(store, max_frame, skip_frame, scale=1):
@@ -168,13 +181,6 @@ def predict_in_batches(x, forward_fn, state):
      
             return predictions
         
-    
-def _adpative_thresholding_flclip(store, blocksize=15, Constant =4):
-     
-     for i in range(store.frame_count):
-        img = (store.get_next_image()[0]).astype(np.uint8) 
-        img_th = np.array(cv2.adaptiveThreshold(img,255,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,blocksize,Constant)==0)*((255-img)/255)
-        yield img_th
 
 
 # %%
@@ -259,8 +265,7 @@ View results
 """
 
 Results_folder = Path(str(Path(input_vid).parent).replace('RawVideos','Results')).joinpath('skeletonNN.hdf5')
-store = imgstore.new_for_filename(str(input_vid))
-video = store.get_image(store.frame_min)[0] 
+
 
 #%%
 #predictions_list = []
@@ -269,7 +274,7 @@ with h5py.File(Results_folder, 'r') as f:
 
 #%%
 identities_list, splines_list = dt.identity_assignment(predictions_list, memory=15)
-identities_list, splines_list = dt.merge_tracks(identities_list, splines_list, framesize=video.shape[1])
+identities_list, splines_list = dt.merge_tracks(identities_list, splines_list, framesize=bgd.shape[0])
 
 
 #%%
@@ -357,7 +362,7 @@ Calculate the time series
 
 """
 skeleton_folder = Path(str(Path(input_vid).parent).replace('RawVideos','Results')).joinpath('metadata_featuresN.hdf5')
-fovsplitter= _return_masked_image(input_vid)
+
 wormstats_header= wormstats()
 segment4angle =max(1, int(round(splines_list[0].shape[1]/10)))
 unique_worm_IDS = list( set(x for sublist in identities_list for x in sublist))
@@ -435,45 +440,14 @@ with tb.File(skeleton_folder, 'w') as f:
            
            
            
+if MW_mapping:
+    fovsplitter= _return_masked_image(input_vid,px2um=microns_per_pixel, json_fname=MW_mapping)
+    fovsplitter.write_fov_wells_to_file(skeleton_folder)
 
-fovsplitter.write_fov_wells_to_file(skeleton_folder)
+
 t_end = time.time()   
 print(f'total time taken is {(t_end-t_s)/60} minutes')
 
 print('Data processing compeleted')
 #%%
 
-if __name__=='__main__':
-    step_size = 5
-    min_frame = 50
-    max_frame = 150
-    skip_frame=step_size
-    time_ls = np.arange(min_frame,max_frame,skip_frame)
-    store = imgstore.new_for_filename(str(input_vid))
-    bn = Path(Results_folder).parent.name
-    video = store.get_image(store.frame_min+time_ls[0])[0] 
-    masked_img = _return_masked_image(input_vid)
-    output = os.path.join(Path(str(Path(input_vid).parent).replace('RawVideos','Results')),'detection')
-    plt.style.use("fast")
-    outdir_path = Path(output)
-    outdir_path.mkdir(exist_ok=True, parents=True)
-    for t, preds in enumerate(predictions_list):
-        video = store.get_image(store.frame_min+time_ls[t])[0] 
-        fig = plt.figure()
-        ax = fig.add_subplot(111, aspect='equal')
-        plt.ylim(0, video.shape[0])
-        plt.xlim(0, video.shape[1])
-        plt.imshow(video, cmap="gray")
-    
-        w,s,p = preds
-        for i in range(s.shape[0]):
-            if s[i]>=0.5:
-                plt.figure(1)
-                plt.plot(w[i,1,:,0], w[i,1,:,1], linewidth=0.3)
-        
-        figname = outdir_path.joinpath(f"{t:04d}.png")
-        plt.axis('off')
-        fig.savefig(figname, pad_inches=0, bbox_inches="tight", dpi=500)
-        plt.close(fig)
-  
-# %%

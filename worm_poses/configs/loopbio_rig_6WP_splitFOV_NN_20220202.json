@@ -1,0 +1,15 @@
+{
+    "analysis_type": "TIERPSY_CNN",
+    "skip_frame": 10,
+    "step_size": 5,
+    "nframes": 11,
+    "n_suggestions": 8,
+    "latent_dim": 8,
+    "expected_fps": 25,
+    "microns_per_pixe": 12.4,
+    "MWP_mapping": "",
+    "is_light_background": true,
+    "thresh_C": 15,
+    "thresh_block_size": 1
+
+}
